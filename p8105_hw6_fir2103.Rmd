@@ -1,0 +1,162 @@
+---
+title: "p8105_hw6_fir2103"
+author: "Farizah Rob"
+date: "2022-12-01"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(readr)
+library(purrr)
+library(modelr)
+library(mgcv)
+```
+
+### Problem 2
+
+- maybe get rid of the people with sex Unknown
+
+```{r}
+homicide_data <- read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv")
+
+homicide_tidy <- 
+  homicide_data %>%
+  mutate(city_state = str_c(city, state, sep = ", "), 
+         solved = ifelse(disposition == "Closed by arrest", 1, 0)) %>%
+  filter(city_state != "Dallas, TX" & 
+           city_state != "Phoenix, AZ" & 
+           city_state != "Kansas City, MO" &
+           city_state != "Tulsa, AL") %>%
+  filter(victim_race == "White" | victim_race == "Black") %>%
+  filter(victim_sex != "Unknown") %>%
+  mutate(victim_age = as.numeric(victim_age))
+```
+
+Fit a logistic regression model for Baltimore, MD
+
+```{r}
+baltimore_data <- homicide_tidy %>% 
+  filter(city_state == "Baltimore, MD")
+
+model_1 <- glm(solved ~ victim_age + victim_sex + victim_race, data = baltimore_data, family = binomial())
+
+model_1_summ <- model_1 %>% 
+  broom::tidy() %>%
+  mutate(OR = exp(estimate)) %>%
+  select(term, log_OR = estimate, OR, std.error, p.value)
+
+# 95% CI for confidence interval 
+
+exp(confint(model_1))
+```
+
+```{r}
+glm_all <- homicide_tidy %>%
+  group_by(city_state) %>%
+  nest() %>%
+  mutate(models = map(data, ~glm(solved ~ victim_age + victim_sex + victim_race, data =., family = binomial())), 
+         results = map(models, broom::tidy, conf.int = TRUE)) %>%
+  select(city_state, models, results) %>%
+  unnest(cols = results)
+
+names(glm_all)
+
+
+glm_or <- glm_all %>%
+  mutate(OR = exp(estimate), 
+         OR_conf.low = exp(conf.low), 
+         OR_conf.high = exp(conf.high)) %>%
+  select(city_state, term, OR, OR_conf.low, OR_conf.high, p.value) %>%
+  filter(term == "victim_sexMale")
+
+
+#plot
+glm_or %>%
+  ggplot(aes(x = fct_reorder(city_state, OR), y = OR)) + geom_point() + 
+  geom_errorbar(aes(ymin = OR_conf.low, ymax = OR_conf.high)) + 
+  theme(legend.position = "none", axis.text.x = element_text(angle = 90)) +
+  labs(x = "City, State", title = "95% CI's of adjusted odds ratios for solving homicides comparing male victims to female victims")
+```
+
+Comment on this plot - get interpretation of odds ratio
+
+
+### Problem 3
+
+```{r}
+birthwt_df <- read_csv("birthweight.csv")
+
+#convert babysex to binary, Male = 1, Female = 0
+
+birthwt_tidy <- birthwt_df %>%
+  janitor::clean_names() %>%
+  mutate(babysex = ifelse(babysex == 1, 1, 0), 
+         frace = factor(frace), 
+         mrace = factor(mrace))
+
+#check for missing data 
+
+birthwt_tidy[!complete.cases(birthwt_tidy),]
+
+# no missing baby sex 
+
+unique(is.na(birthwt_tidy$babysex))
+
+dim(birthwt_tidy)
+```
+
+Some EDA before fitting model 
+
+```{r}
+#look at continuous variables related to baby
+
+pairs(bwt ~  bhead + blength + gaweeks, data = birthwt_tidy)
+
+# Look at continuous variables related to mother
+
+pairs(bwt ~ delwt + menarche + mheight + momage, data = birthwt_tidy)
+
+cor(birthwt_df$bwt, y = birthwt_df[, -4], use = "everything") %>%
+  as_tibble()
+
+#high correlation with bhead, blength in terms of correlation coefficient 
+#other factors that could be important are delwt, momage, smoken
+
+```
+
+
+```{r}
+cv_df <-
+  crossv_mc(birthwt_tidy, 100)
+
+train_df <- cv_df %>% pull(train) %>% .[[1]] %>% as_tibble
+
+test_df <- cv_df %>% pull(test) %>% .[[1]] %>% as_tibble
+
+cv_df <-
+  cv_df %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble))
+```
+
+Comparing
+
+```{r}
+cv_df = 
+  cv_df %>% 
+  mutate(
+    linear_mod  = map(train, ~lm(y ~ x, data = .x)),
+    smooth_mod  = map(train, ~mgcv::gam(y ~ s(x), data = .x)),
+    wiggly_mod  = map(train, ~gam(y ~ s(x, k = 30), sp = 10e-6, data = .x))) %>% 
+  mutate(
+    rmse_linear = map2_dbl(linear_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_smooth = map2_dbl(smooth_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_wiggly = map2_dbl(wiggly_mod, test, ~rmse(model = .x, data = .y)))
+```
+
