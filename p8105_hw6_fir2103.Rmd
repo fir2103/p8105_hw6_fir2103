@@ -6,20 +6,116 @@ output: github_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(viridis)
+library(MASS)
+library(modelr)
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	warning = FALSE,
+	fig.width = 8, 
+  fig.height = 6,
+  out.width = "90%"
+)
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+### Due date
+
+Due: December 3 at 11:59pm. 
+
+### Points
+
+| Problem         | Points    |
+|:--------------- |:--------- |
+| Problem 0       | 20        |
+| Problem 1       | --        |
+| Problem 2       | 40        |
+| Problem 3       | 40        |
+
+
+### Problem 0
+
+This "problem" focuses on structure of your assignment, including the use of R Markdown to write reproducible reports, the use of R Projects to organize your work, the use of relative paths to load data, and the naming structure for your files. 
+
+To that end: 
+
+* create a public GitHub repo + local R Project for this assignment
+* write solutions using a .Rmd file that outputs a `github_document` / .md file
+* submit a link to your repo via Courseworks
+
+Your solutions to Problems 1 and 2 should be implemented in your .Rmd file, and your git commit history should reflect the process you used to solve these Problems. 
+
+For Problem 0, we will assess adherence to the instructions above regarding repo structure, git commit history, and whether we are able to knit your .Rmd to ensure that your work is reproducible. Adherence to appropriate styling and clarity of code will be assessed in Problems 1+ using the homework [style rubric](homework_style_rubric.html). 
+
+This homework includes figures; the readability of your embedded plots (e.g. font sizes, axis labels, titles) will be assessed in Problems 1+.
+
+### Problem 1
+
+To obtain a distribution for $\hat{r}^2$, we'll follow basically the same procedure we used for regression coefficients: draw bootstrap samples; the a model to each; extract the value I'm concerned with; and summarize. Here, we'll use `modelr::bootstrap` to draw the samples and `broom::glance` to produce `r.squared` values. 
+
+```{r weather_df, cache = TRUE}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  dplyr::select(name, id, everything())
 ```
 
 ```{r}
-library(tidyverse)
-library(readr)
-library(purrr)
-library(modelr)
-library(mgcv)
+weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x) ),
+    results = map(models, broom::glance)) %>% 
+  dplyr::select(-strap, -models) %>% 
+  unnest(results) %>% 
+  ggplot(aes(x = r.squared)) + geom_density()
 ```
 
-### Problem 2
+In this example, the $\hat{r}^2$ value is high, and the upper bound at 1 may be a cause for the generally skewed shape of the distribution. If we wanted to construct a confidence interval for $R^2$, we could take the 2.5% and 97.5% quantiles of the estimates across bootstrap samples. However, because the shape isn't symmetric, using the mean +/- 1.96 times the standard error probably wouldn't work well.
 
-- maybe get rid of the people with sex Unknown
+We can produce a distribution for $\log(\beta_0 * \beta1)$ using a similar approach, with a bit more wrangling before we make our plot.
+
+```{r}
+weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x) ),
+    results = map(models, broom::tidy)) %>% 
+  dplyr::select(-strap, -models) %>% 
+  unnest(results) %>% 
+  dplyr::select(id = `.id`, term, estimate) %>% 
+  pivot_wider(
+    names_from = term, 
+    values_from = estimate) %>% 
+  rename(beta0 = `(Intercept)`, beta1 = tmin) %>% 
+  mutate(log_b0b1 = log(beta0 * beta1)) %>% 
+  ggplot(aes(x = log_b0b1)) + geom_density()
+```
+
+As with $r^2$, this distribution is somewhat skewed and has some outliers. 
+
+The point of this is not to say you should always use the bootstrap -- it's possible to establish "large sample" distributions for strange parameters / values / summaries in a lot of cases, and those are great to have. But it is helpful to know that there's a way to do inference even in tough cases. 
+
+### Problem 2
 
 ```{r}
 homicide_data <- read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv")
@@ -27,14 +123,11 @@ homicide_data <- read_csv("https://raw.githubusercontent.com/washingtonpost/data
 homicide_tidy <- 
   homicide_data %>%
   mutate(city_state = str_c(city, state, sep = ", "), 
-         solved = ifelse(disposition == "Closed by arrest", 1, 0)) %>%
-  filter(city_state != "Dallas, TX" & 
-           city_state != "Phoenix, AZ" & 
-           city_state != "Kansas City, MO" &
-           city_state != "Tulsa, AL") %>%
-  filter(victim_race == "White" | victim_race == "Black") %>%
-  filter(victim_sex != "Unknown") %>%
-  mutate(victim_age = as.numeric(victim_age))
+         solved = ifelse(disposition == "Closed by arrest", 1, 0),
+         victim_age = as.numeric(victim_age)) %>%
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+         victim_race %in% c("White", "Black"),
+         victim_sex != "Unknown")
 ```
 
 Fit a logistic regression model for Baltimore, MD
@@ -43,17 +136,22 @@ Fit a logistic regression model for Baltimore, MD
 baltimore_data <- homicide_tidy %>% 
   filter(city_state == "Baltimore, MD")
 
-model_1 <- glm(solved ~ victim_age + victim_sex + victim_race, data = baltimore_data, family = binomial())
+model_1 <- glm(solved ~ victim_age + victim_sex + victim_race, data = baltimore_data, family = binomial()) 
 
 model_1_summ <- model_1 %>% 
-  broom::tidy() %>%
-  mutate(OR = exp(estimate)) %>%
-  select(term, log_OR = estimate, OR, std.error, p.value)
+  broom::tidy(conf.int = TRUE) %>%
+  mutate(OR = exp(estimate), 
+         OR_conf.low = exp(conf.low), 
+         OR_conf.high = exp(conf.high)) %>%
+  filter(term  == "victim_sexMale") %>%
+  dplyr::select(term, OR, OR_conf.low, OR_conf.high, p.value) %>%
+  knitr::kable(digits = 4)
 
-# 95% CI for confidence interval 
-
-exp(confint(model_1))
+model_1_summ
 ```
+
+Since the odds ratio is less than 1 (0.43) and female gender is the baseline category, solving homicides with female victims is less likely than solving homicides with male victims (about a 57% decrease in likelihood).
+
 
 ```{r}
 glm_all <- homicide_tidy %>%
@@ -61,19 +159,17 @@ glm_all <- homicide_tidy %>%
   nest() %>%
   mutate(models = map(data, ~glm(solved ~ victim_age + victim_sex + victim_race, data =., family = binomial())), 
          results = map(models, broom::tidy, conf.int = TRUE)) %>%
-  select(city_state, models, results) %>%
+  dplyr::select(city_state, models, results) %>%
   unnest(cols = results)
-
-names(glm_all)
-
 
 glm_or <- glm_all %>%
   mutate(OR = exp(estimate), 
          OR_conf.low = exp(conf.low), 
          OR_conf.high = exp(conf.high)) %>%
-  select(city_state, term, OR, OR_conf.low, OR_conf.high, p.value) %>%
-  filter(term == "victim_sexMale")
+  dplyr::select(city_state, term, OR, OR_conf.low, OR_conf.high, p.value) %>%
+  filter(term == "victim_sexMale") 
 
+glm_or
 
 #plot
 glm_or %>%
@@ -83,8 +179,7 @@ glm_or %>%
   labs(x = "City, State", title = "95% CI's of adjusted odds ratios for solving homicides comparing male victims to female victims")
 ```
 
-Comment on this plot - get interpretation of odds ratio
-
+For most cities, the odds of solving homicides with female victims is less likely (lower) than the odds of solving homicides with male victims. For the cities of Stockton, CA and Albuquerque, NM - the odds of solving homicides with female victims is higher than the odds of solving homicides with male victims. For those cities with odds ratio > 1, the confidence intervals tend to be wider. 
 
 ### Problem 3
 
@@ -102,22 +197,19 @@ birthwt_tidy <- birthwt_df %>%
 #check for missing data 
 
 birthwt_tidy[!complete.cases(birthwt_tidy),]
-
-# no missing baby sex 
-
-unique(is.na(birthwt_tidy$babysex))
-
-dim(birthwt_tidy)
 ```
 
-Some EDA before fitting model 
+For data cleaning, the `babysex` variable was converted to a binary variable with levels 1 and 0 (1 = male, 0 = female). The father's race and mother's race variables were converted to factor variables. The birthweight dataset has `r nrow(birthwt_tidy)` rows and `r ncol(birthwt_tidy)` columns. There are no missing values in the dataset. 
+
+
+Since `bwt` (birthweight) is a continuous, numeric variable - we will build a linear regression model to predict it. Before fitting a model, I conducted EDA and created some pairwise scatterplots (below) of birthweight against other variables in the dataset to see if there is any obvious association. 
 
 ```{r}
 #look at continuous variables related to baby
 
-pairs(bwt ~  bhead + blength + gaweeks, data = birthwt_tidy)
+pairs(bwt ~ bhead + blength + gaweeks, data = birthwt_tidy)
 
-# Look at continuous variables related to mother
+# look at continuous variables related to mother
 
 pairs(bwt ~ delwt + menarche + mheight + momage, data = birthwt_tidy)
 
@@ -126,33 +218,44 @@ cor(birthwt_df$bwt, y = birthwt_df[, -4], use = "everything") %>%
 
 #high correlation with bhead, blength in terms of correlation coefficient 
 #other factors that could be important are delwt, momage, smoken, gaweeks
-
 ```
 
-First model 
+From EDA, some variables that could be important predictors are bhead, blength, delwt, gaweeks, momage and smoken. 
+I carried out stepwise backward selection by AIC using the `stepAIC` function from the package `MASS`. We started with the full model and removed predictors. 
 
 ```{r}
-linear_mod <- lm(bwt ~ bhead + blength + delwt + gaweeks + smoken + mrace, data = birthwt_tidy)
-summary(linear_mod)
+full_model <- lm(bwt ~., data = birthwt_tidy)
+step_model <- stepAIC(full_model, direction = "backward", 
+                      trace = FALSE)
+summary(step_model)
 ```
 
-Plot of residual vs fitted
+Stepwise backward selection consists of the predictors: `babysex`, `blength`, `bhead`, `delwwt`, `fincome`, `gaweeks`, `mheight`, `mrace`, `parity`, `ppwt`, and `smoken`. Therefore, I am fitting a linear regression model with these predictors. The adjusted R-squared is 0.7173 which is quite high and suggests a decent model fit. 
+
+```{r}
+my_mod <- lm(bwt ~ babysex + bhead + blength + delwt + fincome + 
+    gaweeks + mheight + mrace + parity + ppwt + smoken, data = birthwt_tidy)
+summary(my_mod)
+```
+
+Plot of residual vs fitted values 
 
 ```{r}
 birthwt_tidy %>%
-  modelr::add_predictions(linear_mod) %>%
-  modelr::add_residuals(linear_mod) %>%
-  ggplot(aes(x = resid, y = pred)) + geom_point() + labs(x = "Residuals", y = "Fitted Values", title = "Residual vs Fitted Plot")
+  modelr::add_predictions(my_mod) %>%
+  modelr::add_residuals(my_mod) %>%
+  ggplot(aes(x = pred, y = resid)) + geom_point() + labs(x = "Fitted Values", y = "Residuals", title = "Residual vs Fitted Plot")
 ```
+The residuals vs fitted values seems more or less random, and there is no specific pattern which is the type of pattern we are looking for. 
 
-Cross-validation and model comparison
+
+### Cross-validation and model comparison
 
 ```{r}
 cv_df <-
   crossv_mc(birthwt_tidy, 100)
 
 train_df <- cv_df %>% pull(train) %>% .[[1]] %>% as_tibble
-
 test_df <- cv_df %>% pull(test) %>% .[[1]] %>% as_tibble
 
 cv_df <-
@@ -162,15 +265,24 @@ cv_df <-
     test = map(test, as_tibble))
 ```
 
-Comparing models
+### Comparing models
 
 ```{r}
-#let's fit model of birthwt with bhead, blength, delwt, gaweeks
+second_mod <- lm(bwt ~ blength + gaweeks, data = birthwt_tidy)
+summary(second_mod)
 
+third_mod <- lm(bwt ~ bhead*blength*babysex, data = birthwt_tidy)
+summary(third_mod)
+```
+
+The adjusted r-squared of the model with `blength` and `gaweeks` as main effects is 0.5767, the adjusted r-squared of the model with the interaction terms of `bhead`, `blength`, and `babysex` is 0.6844. Both R-squared values are lower than that of my model, therefore suggesting a poorer fit. 
+
+```{r}
 cv_df <-
   cv_df %>% 
   mutate(
-    my_mod  = map(train, ~lm(bwt ~ bhead + blength + delwt + gaweeks + smoken + mrace, data = .x)),
+    my_mod  = map(train, ~lm(bwt ~ babysex + bhead + blength + delwt + fincome + 
+    gaweeks + mheight + mrace + parity + ppwt + smoken, data = .x)),
     second_mod  = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
     third_mod  = map(train, ~lm(bwt ~ bhead*blength*babysex, data = .x))) %>% 
   mutate(
@@ -178,8 +290,9 @@ cv_df <-
     rmse_second = map2_dbl(second_mod, test, ~rmse(model = .x, data = .y)),
     rmse_third = map2_dbl(third_mod, test, ~rmse(model = .x, data = .y)))
 
+
 cv_df %>% 
-  select(starts_with("rmse")) %>% 
+  dplyr::select(starts_with("rmse")) %>% 
   pivot_longer(
     everything(),
     names_to = "model", 
@@ -189,4 +302,4 @@ cv_df %>%
   ggplot(aes(x = model, y = rmse)) + geom_violin()
 ```
 
-My model is the best model!
+Plotting the prediction error in the above violin plot for all three models, we can see that the best predictive accuracy is achieved by my model. The model with main and interaction effects of `bhead`, `blength`, and `babysex` is also close to my model, whereas the model with only the main effects of `blength` and `gaweeks` is the worst in its predictive accuracy. 
